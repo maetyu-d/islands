@@ -5,10 +5,16 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -24,6 +30,9 @@ namespace
     constexpr std::int32_t kIslandCount = 4;
     constexpr std::int32_t kIslandSize = 64;
     constexpr std::int32_t kIslandGap = 28;
+    constexpr std::int32_t kFocusedSubIslandCount = 4;
+    constexpr std::int32_t kFocusedSubIslandSize = 32;
+    constexpr std::int32_t kFocusedSubIslandGap = 16;
     constexpr float kCubeSize = 1.0f;
     constexpr float kSlabThickness = 2.5f;
 
@@ -37,35 +46,45 @@ namespace
     constexpr unsigned char kKeyNLower = 110;
     constexpr unsigned char kKeyGUpper = 71;
     constexpr unsigned char kKeyGLower = 103;
+    constexpr unsigned char kKeyJUpper = 74;
+    constexpr unsigned char kKeyJLower = 106;
     constexpr unsigned char kKeyKUpper = 75;
     constexpr unsigned char kKeyKLower = 107;
+    constexpr unsigned char kKeyLUpper = 76;
+    constexpr unsigned char kKeyLLower = 108;
+    constexpr unsigned char kKeyUUpper = 85;
+    constexpr unsigned char kKeyULower = 117;
+    constexpr unsigned char kKeyWUpper = 87;
+    constexpr unsigned char kKeyWLower = 119;
+    constexpr unsigned char kKeyAUpper = 65;
+    constexpr unsigned char kKeyALower = 97;
     constexpr unsigned char kKeySUpper = 83;
     constexpr unsigned char kKeySLower = 115;
+    constexpr unsigned char kKeyDUpper = 68;
+    constexpr unsigned char kKeyDLower = 100;
+    constexpr unsigned char kKeyQUpper = 81;
+    constexpr unsigned char kKeyQLower = 113;
+    constexpr unsigned char kKeyEUpper = 69;
+    constexpr unsigned char kKeyELower = 101;
+    constexpr unsigned char kKeyRUpper = 82;
+    constexpr unsigned char kKeyRLower = 114;
+    constexpr unsigned char kKeyTUpper = 84;
+    constexpr unsigned char kKeyTLower = 116;
+    constexpr unsigned char kKeyEnter = 13;
     constexpr unsigned char kKeyComma = 44;
     constexpr unsigned char kKeyPeriod = 46;
     constexpr unsigned char kKeyEscape = 27;
+    constexpr int kSpecialLeft = GLUT_KEY_LEFT;
+    constexpr int kSpecialUp = GLUT_KEY_UP;
+    constexpr int kSpecialRight = GLUT_KEY_RIGHT;
+    constexpr int kSpecialDown = GLUT_KEY_DOWN;
+    constexpr unsigned int kAutosaveIntervalMs = 120000u;
 
     struct Color3f
     {
         float r;
         float g;
         float b;
-    };
-
-    struct MeshVertex
-    {
-        float x;
-        float y;
-        float z;
-        float r;
-        float g;
-        float b;
-    };
-
-    struct SceneMesh
-    {
-        std::vector<MeshVertex> quads;
-        std::vector<MeshVertex> lines;
     };
 
     struct ScaleDefinition
@@ -110,12 +129,22 @@ namespace
     float gCameraAngle = -0.78539816339f;
     bool gFourFloorMode = false;
     bool gIslandMode = false;
+    bool gDetailView = false;
+    bool gDetailSubIslandMode = false;
+    bool gDetailQuarterView = false;
     std::int32_t gSelectedKey = 0;
     std::size_t gSelectedScale = 1;
     std::uint32_t gSeed = 0xC0FFEEu;
-    std::vector<std::uint8_t> gHeights(kFloorCount * kGridWidth * kGridDepth);
-    SceneMesh gSceneMesh;
-    bool gSceneMeshDirty = true;
+    std::vector<std::uint8_t> gBlocks(static_cast<std::size_t>(kFloorCount) * kGridWidth * kGridDepth * kGridHeight, 0);
+    std::int32_t gActiveIsland = 2;
+    std::int32_t gActiveFloor = kFloorCount - 1;
+    std::int32_t gActiveDetailSubIsland = 0;
+    std::int32_t gCursorX = kGridWidth / 2;
+    std::int32_t gCursorY = kGridDepth / 2;
+    std::int32_t gCursorZ = 0;
+    std::string gSaveStatus = "Save: not yet saved";
+    std::string gSavePath;
+    bool gAutosaveEnabled = false;
 
     constexpr Color3f kSkyTop = {0.06f, 0.08f, 0.16f};
     constexpr Color3f kSkyBottom = {0.01f, 0.01f, 0.03f};
@@ -128,9 +157,60 @@ namespace
         return static_cast<std::size_t>(kGridWidth) * kGridDepth;
     }
 
+    struct DrdHeader
+    {
+        char magic[4];
+        std::uint32_t version;
+        std::uint32_t gridWidth;
+        std::uint32_t gridDepth;
+        std::uint32_t gridHeight;
+        std::uint32_t floorCount;
+        std::uint32_t seed;
+        std::int32_t selectedKey;
+        std::uint32_t selectedScale;
+        std::uint8_t fourFloorMode;
+        std::uint8_t islandMode;
+        std::uint8_t detailView;
+        std::uint8_t detailSubIslandMode;
+        std::uint8_t detailQuarterView;
+        std::int32_t activeIsland;
+        std::int32_t activeFloor;
+        std::int32_t activeDetailSubIsland;
+        std::int32_t cursorX;
+        std::int32_t cursorY;
+        std::int32_t cursorZ;
+        float zoom;
+        float cameraAngle;
+    };
+
+    void syncActiveSelection();
+    bool isLayerAllowed(std::int32_t absoluteLayer);
+    float floorBaseZ(std::int32_t floorIndex);
+    std::int32_t islandSourceStartX(std::int32_t islandIndex);
+    std::int32_t islandSourceStartY(std::int32_t islandIndex);
+
+    struct BuildContext
+    {
+        bool valid;
+        std::int32_t sourceStartX;
+        std::int32_t sourceStartY;
+        std::int32_t width;
+        std::int32_t depth;
+        std::int32_t totalLayers;
+    };
+
     std::size_t indexFor(std::int32_t floorIndex, std::int32_t x, std::int32_t y)
     {
         return static_cast<std::size_t>(floorIndex) * layerStride()
+             + static_cast<std::size_t>(y) * kGridWidth
+             + x;
+    }
+
+    std::size_t blockIndexFor(std::int32_t floorIndex, std::int32_t x, std::int32_t y, std::int32_t z)
+    {
+        const auto floorStride = static_cast<std::size_t>(kGridWidth) * kGridDepth * kGridHeight;
+        return static_cast<std::size_t>(floorIndex) * floorStride
+             + static_cast<std::size_t>(z) * kGridWidth * kGridDepth
              + static_cast<std::size_t>(y) * kGridWidth
              + x;
     }
@@ -200,25 +280,439 @@ namespace
 
     void regenerateBlocks()
     {
+        std::fill(gBlocks.begin(), gBlocks.end(), static_cast<std::uint8_t>(0));
+
         for (std::int32_t floorIndex = 0; floorIndex < kFloorCount; ++floorIndex)
         {
             for (std::int32_t y = 0; y < kGridDepth; ++y)
             {
                 for (std::int32_t x = 0; x < kGridWidth; ++x)
                 {
-                    gHeights[indexFor(floorIndex, x, y)] = sampleHeight(floorIndex, x, y);
+                    const auto height = sampleHeight(floorIndex, x, y);
+                    for (std::int32_t z = 0; z < height; ++z)
+                    {
+                        if (isLayerAllowed(z + 1))
+                        {
+                            gBlocks[blockIndexFor(floorIndex, x, y, z)] = 1;
+                        }
+                    }
                 }
             }
         }
     }
 
+    std::string nextSavePath()
+    {
+        std::time_t now = std::time(nullptr);
+        std::tm localTime{};
+#if defined(_WIN32)
+        localtime_s(&localTime, &now);
+#else
+        localtime_r(&now, &localTime);
+#endif
+
+        char buffer[64];
+        if (std::strftime(buffer, sizeof(buffer), "world_%Y%m%d_%H%M%S.drd", &localTime) == 0)
+        {
+            return "world.drd";
+        }
+
+        return std::string(buffer);
+    }
+
+    std::string shellSingleQuoted(const std::string& value)
+    {
+        std::string escaped = "'";
+        for (const char ch : value)
+        {
+            if (ch == '\'')
+            {
+                escaped += "'\\''";
+            }
+            else
+            {
+                escaped += ch;
+            }
+        }
+        escaped += "'";
+        return escaped;
+    }
+
+    std::string chooseSavePath()
+    {
+#ifdef __APPLE__
+        const auto suggestedName = nextSavePath();
+        const auto cwd = std::filesystem::current_path().string();
+
+        std::string command = "/usr/bin/osascript";
+        command += " -e ";
+        command += shellSingleQuoted(std::string("set suggestedName to \"") + suggestedName + "\"");
+        command += " -e ";
+        command += shellSingleQuoted(std::string("set defaultLocation to POSIX file \"") + cwd + "\"");
+        command += " -e ";
+        command += shellSingleQuoted("try");
+        command += " -e ";
+        command += shellSingleQuoted("POSIX path of (choose file name with prompt \"Save block world as\" default name suggestedName default location defaultLocation)");
+        command += " -e ";
+        command += shellSingleQuoted("on error number -128");
+        command += " -e ";
+        command += shellSingleQuoted("return \"\"");
+        command += " -e ";
+        command += shellSingleQuoted("end try");
+
+        std::array<char, 1024> buffer{};
+        std::string output;
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe == nullptr)
+        {
+            return std::string();
+        }
+
+        while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        {
+            output += buffer.data();
+        }
+
+        pclose(pipe);
+
+        while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        {
+            output.pop_back();
+        }
+
+        return output;
+#else
+        return nextSavePath();
+#endif
+    }
+
+    bool saveWorldToFile(const std::string& path)
+    {
+        std::ofstream output(path, std::ios::binary);
+        if (!output)
+        {
+            return false;
+        }
+
+        const DrdHeader header = {
+            {'D', 'R', 'D', '1'},
+            2u,
+            static_cast<std::uint32_t>(kGridWidth),
+            static_cast<std::uint32_t>(kGridDepth),
+            static_cast<std::uint32_t>(kGridHeight),
+            static_cast<std::uint32_t>(kFloorCount),
+            gSeed,
+            gSelectedKey,
+            static_cast<std::uint32_t>(gSelectedScale),
+            static_cast<std::uint8_t>(gFourFloorMode ? 1 : 0),
+            static_cast<std::uint8_t>(gIslandMode ? 1 : 0),
+            static_cast<std::uint8_t>(gDetailView ? 1 : 0),
+            static_cast<std::uint8_t>(gDetailSubIslandMode ? 1 : 0),
+            static_cast<std::uint8_t>(gDetailQuarterView ? 1 : 0),
+            gActiveIsland,
+            gActiveFloor,
+            gActiveDetailSubIsland,
+            gCursorX,
+            gCursorY,
+            gCursorZ,
+            gZoom,
+            gCameraAngle
+        };
+
+        output.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        output.write(reinterpret_cast<const char*>(gBlocks.data()), static_cast<std::streamsize>(gBlocks.size()));
+        return static_cast<bool>(output);
+    }
+
+    bool loadWorldFromFile(const std::string& path)
+    {
+        std::ifstream input(path, std::ios::binary);
+        if (!input)
+        {
+            return false;
+        }
+
+        DrdHeader header{};
+        input.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!input)
+        {
+            return false;
+        }
+
+        if (header.magic[0] != 'D' || header.magic[1] != 'R' || header.magic[2] != 'D' || header.magic[3] != '1')
+        {
+            return false;
+        }
+
+        if (header.version != 2u
+            || header.gridWidth != static_cast<std::uint32_t>(kGridWidth)
+            || header.gridDepth != static_cast<std::uint32_t>(kGridDepth)
+            || header.gridHeight != static_cast<std::uint32_t>(kGridHeight)
+            || header.floorCount != static_cast<std::uint32_t>(kFloorCount))
+        {
+            return false;
+        }
+
+        std::vector<std::uint8_t> loadedBlocks(gBlocks.size());
+        input.read(reinterpret_cast<char*>(loadedBlocks.data()), static_cast<std::streamsize>(loadedBlocks.size()));
+        if (!input)
+        {
+            return false;
+        }
+
+        gBlocks = std::move(loadedBlocks);
+        gSeed = header.seed;
+        gSelectedKey = std::clamp(header.selectedKey, 0, 11);
+        gSelectedScale = std::min<std::size_t>(header.selectedScale, (sizeof(kScaleDefinitions) / sizeof(kScaleDefinitions[0])) - 1);
+        gFourFloorMode = header.fourFloorMode != 0;
+        gIslandMode = header.islandMode != 0;
+        gDetailView = header.detailView != 0;
+        gDetailSubIslandMode = header.detailSubIslandMode != 0;
+        gDetailQuarterView = header.detailQuarterView != 0;
+        gActiveIsland = std::clamp(header.activeIsland, 0, kIslandCount - 1);
+        gActiveFloor = std::clamp(header.activeFloor, 0, kFloorCount - 1);
+        gActiveDetailSubIsland = std::clamp(header.activeDetailSubIsland, 0, kFocusedSubIslandCount - 1);
+        gCursorX = header.cursorX;
+        gCursorY = header.cursorY;
+        gCursorZ = header.cursorZ;
+        gZoom = std::clamp(header.zoom, kMinZoom, kMaxZoom);
+        gCameraAngle = header.cameraAngle;
+        syncActiveSelection();
+        return true;
+    }
+
+    std::string latestSavePath()
+    {
+        namespace fs = std::filesystem;
+        fs::path bestPath;
+        fs::file_time_type bestTime;
+        bool found = false;
+
+        for (const auto& entry : fs::directory_iterator(fs::current_path()))
+        {
+            if (!entry.is_regular_file())
+            {
+                continue;
+            }
+
+            if (entry.path().extension() != ".drd")
+            {
+                continue;
+            }
+
+            const auto writeTime = entry.last_write_time();
+            if (!found || writeTime > bestTime)
+            {
+                found = true;
+                bestTime = writeTime;
+                bestPath = entry.path();
+            }
+        }
+
+        return found ? bestPath.filename().string() : std::string();
+    }
+
+    void autosaveCallback(int)
+    {
+        if (gAutosaveEnabled && !gSavePath.empty())
+        {
+            if (saveWorldToFile(gSavePath))
+            {
+                gSaveStatus = "Autosave: " + gSavePath;
+            }
+            else
+            {
+                gSaveStatus = "Autosave failed: " + gSavePath;
+            }
+
+            glutPostRedisplay();
+        }
+
+        glutTimerFunc(kAutosaveIntervalMs, autosaveCallback, 0);
+    }
+
+    bool splitIslandViewActive()
+    {
+        if (gDetailView)
+        {
+            return gDetailSubIslandMode && !gDetailQuarterView;
+        }
+
+        return gIslandMode;
+    }
+
+    BuildContext currentBuildContext()
+    {
+        if (gDetailQuarterView)
+        {
+            return {
+                true,
+                islandSourceStartX(gActiveIsland) + (gActiveDetailSubIsland % 2) * kFocusedSubIslandSize,
+                islandSourceStartY(gActiveIsland) + (gActiveDetailSubIsland / 2) * kFocusedSubIslandSize,
+                kFocusedSubIslandSize,
+                kFocusedSubIslandSize,
+                kPitchBandHeight
+            };
+        }
+
+        if (gDetailView && !gDetailSubIslandMode)
+        {
+            return {
+                true,
+                islandSourceStartX(gActiveIsland),
+                islandSourceStartY(gActiveIsland),
+                kIslandSize,
+                kIslandSize,
+                kPitchBandHeight
+            };
+        }
+
+        if (gIslandMode)
+        {
+            return {false, 0, 0, 0, 0, 0};
+        }
+
+        if (!gDetailView && !gIslandMode)
+        {
+            return {
+                true,
+                0,
+                0,
+                kGridWidth,
+                kGridDepth,
+                gFourFloorMode ? kFloorCount * kGridHeight : kGridHeight
+            };
+        }
+
+        return {false, 0, 0, 0, 0, 0};
+    }
+
+    void clampBuildCursor()
+    {
+        const auto context = currentBuildContext();
+        if (!context.valid)
+        {
+            return;
+        }
+
+        gCursorX = std::clamp(gCursorX, 0, context.width - 1);
+        gCursorY = std::clamp(gCursorY, 0, context.depth - 1);
+        gCursorZ = std::clamp(gCursorZ, 0, context.totalLayers - 1);
+    }
+
+    bool blockExists(std::int32_t floorIndex, std::int32_t x, std::int32_t y, std::int32_t z)
+    {
+        if (floorIndex < 0 || floorIndex >= kFloorCount
+            || x < 0 || x >= kGridWidth
+            || y < 0 || y >= kGridDepth
+            || z < 0 || z >= kGridHeight)
+        {
+            return false;
+        }
+
+        return gBlocks[blockIndexFor(floorIndex, x, y, z)] != 0;
+    }
+
+    void setBlock(std::int32_t floorIndex, std::int32_t x, std::int32_t y, std::int32_t z, bool present)
+    {
+        if (floorIndex < 0 || floorIndex >= kFloorCount
+            || x < 0 || x >= kGridWidth
+            || y < 0 || y >= kGridDepth
+            || z < 0 || z >= kGridHeight)
+        {
+            return;
+        }
+
+        gBlocks[blockIndexFor(floorIndex, x, y, z)] = static_cast<std::uint8_t>(present ? 1 : 0);
+    }
+
+    struct CursorBlockLocation
+    {
+        bool valid;
+        std::int32_t sourceFloorIndex;
+        std::int32_t sourceX;
+        std::int32_t sourceY;
+        std::int32_t localZ;
+        std::int32_t colorLayer;
+        float markerBaseZ;
+        float guideBaseZ;
+        float originX;
+        float originY;
+    };
+
+    CursorBlockLocation currentCursorLocation()
+    {
+        const auto context = currentBuildContext();
+        if (!context.valid)
+        {
+            return {false, 0, 0, 0, 0, 1, 0.0f, 0.0f, 0.0f, 0.0f};
+        }
+
+        clampBuildCursor();
+
+        if (gDetailQuarterView)
+        {
+            return {
+                true,
+                gActiveFloor,
+                context.sourceStartX + gCursorX,
+                context.sourceStartY + gCursorY,
+                gCursorZ,
+                1 + gActiveFloor * kPitchBandHeight + gCursorZ,
+                static_cast<float>(gCursorZ) * kCubeSize,
+                0.0f,
+                static_cast<float>(gCursorX) * kCubeSize,
+                static_cast<float>(gCursorY) * kCubeSize
+            };
+        }
+
+        if (gDetailView && !gDetailSubIslandMode)
+        {
+            return {
+                true,
+                gActiveFloor,
+                context.sourceStartX + gCursorX,
+                context.sourceStartY + gCursorY,
+                gCursorZ,
+                1 + gActiveFloor * kPitchBandHeight + gCursorZ,
+                static_cast<float>(gCursorZ) * kCubeSize,
+                0.0f,
+                static_cast<float>(gCursorX) * kCubeSize,
+                static_cast<float>(gCursorY) * kCubeSize
+            };
+        }
+
+        const auto sourceFloorIndex = gFourFloorMode ? std::clamp(gCursorZ / kGridHeight, 0, kFloorCount - 1) : 0;
+        const auto localZ = gFourFloorMode ? (gCursorZ % kGridHeight) : gCursorZ;
+        return {
+            true,
+            sourceFloorIndex,
+            gCursorX,
+            gCursorY,
+            localZ,
+            localZ + 1,
+            floorBaseZ(sourceFloorIndex) + static_cast<float>(localZ) * kCubeSize,
+            floorBaseZ(sourceFloorIndex),
+            static_cast<float>(gCursorX) * kCubeSize,
+            static_cast<float>(gCursorY) * kCubeSize
+        };
+    }
+
     std::int32_t activeFloorCount()
     {
+        if (gDetailView)
+        {
+            return 1;
+        }
         return gFourFloorMode ? kFloorCount : 1;
     }
 
     std::int32_t activeSegmentLayerCount()
     {
+        if (gDetailView)
+        {
+            return kPitchBandHeight;
+        }
         return (gIslandMode && gFourFloorMode) ? kPitchBandHeight : kGridHeight;
     }
 
@@ -235,6 +729,19 @@ namespace
 
     float sceneSpanX()
     {
+        if (gDetailView)
+        {
+            if (gDetailSubIslandMode)
+            {
+                if (gDetailQuarterView)
+                {
+                    return static_cast<float>(kFocusedSubIslandSize) * kCubeSize;
+                }
+                return static_cast<float>(kFocusedSubIslandSize * 2 + kFocusedSubIslandGap) * kCubeSize;
+            }
+            return static_cast<float>(kIslandSize) * kCubeSize;
+        }
+
         if (!gIslandMode)
         {
             return static_cast<float>(kGridWidth) * kCubeSize;
@@ -245,6 +752,19 @@ namespace
 
     float sceneSpanY()
     {
+        if (gDetailView)
+        {
+            if (gDetailSubIslandMode)
+            {
+                if (gDetailQuarterView)
+                {
+                    return static_cast<float>(kFocusedSubIslandSize) * kCubeSize;
+                }
+                return static_cast<float>(kFocusedSubIslandSize * 2 + kFocusedSubIslandGap) * kCubeSize;
+            }
+            return static_cast<float>(kIslandSize) * kCubeSize;
+        }
+
         if (!gIslandMode)
         {
             return static_cast<float>(kGridDepth) * kCubeSize;
@@ -265,6 +785,18 @@ namespace
         return static_cast<float>(islandIndex / 2) * stride;
     }
 
+    float focusedSubIslandOriginX(std::int32_t islandIndex)
+    {
+        const float stride = static_cast<float>(kFocusedSubIslandSize + kFocusedSubIslandGap) * kCubeSize;
+        return static_cast<float>(islandIndex % 2) * stride;
+    }
+
+    float focusedSubIslandOriginY(std::int32_t islandIndex)
+    {
+        const float stride = static_cast<float>(kFocusedSubIslandSize + kFocusedSubIslandGap) * kCubeSize;
+        return static_cast<float>(islandIndex / 2) * stride;
+    }
+
     std::int32_t islandSourceStartX(std::int32_t islandIndex)
     {
         return (islandIndex % 2 == 0) ? 32 : (kGridWidth - kIslandSize - 32);
@@ -273,15 +805,6 @@ namespace
     std::int32_t islandSourceStartY(std::int32_t islandIndex)
     {
         return (islandIndex / 2 == 0) ? 32 : (kGridDepth - kIslandSize - 32);
-    }
-
-    std::int32_t blockHeight(std::int32_t floorIndex, std::int32_t x, std::int32_t y)
-    {
-        if (floorIndex < 0 || floorIndex >= kFloorCount || x < 0 || x >= kGridWidth || y < 0 || y >= kGridDepth)
-        {
-            return 0;
-        }
-        return gHeights[indexFor(floorIndex, x, y)];
     }
 
     Color3f levelColor(std::int32_t z)
@@ -334,6 +857,71 @@ namespace
         return stream.str();
     }
 
+    const char* islandPositionName(std::int32_t islandIndex)
+    {
+        switch (islandIndex)
+        {
+        case 1:
+            return "Right";
+        case 2:
+            return "Top";
+        case 3:
+            return "Bottom";
+        case 0:
+            return "Left";
+        default:
+            return "Unknown";
+        }
+    }
+
+    std::string activeSelectionSummary()
+    {
+        if (gDetailView && gDetailSubIslandMode)
+        {
+            static constexpr const char* kQuarterNames[4] = {
+                "Top Left", "Top Right", "Bottom Left", "Bottom Right"
+            };
+
+            std::ostringstream stream;
+            stream << "Selection: " << kQuarterNames[gActiveDetailSubIsland];
+            if (gDetailQuarterView)
+            {
+                stream << " / Focused";
+            }
+            return stream.str();
+        }
+
+        if (!gIslandMode || !gFourFloorMode)
+        {
+            return "Selection: n/a";
+        }
+
+        std::ostringstream stream;
+        stream << "Selection: " << islandPositionName(gActiveIsland)
+               << " / Layer " << (gActiveFloor + 1);
+        return stream.str();
+    }
+
+    std::string buildStatusSummary()
+    {
+        const auto context = currentBuildContext();
+        if (!context.valid)
+        {
+            return "Build: unavailable in split island view";
+        }
+
+        const auto location = currentCursorLocation();
+        std::ostringstream stream;
+        stream << "Build: x=" << gCursorX
+               << " y=" << gCursorY
+               << " z=" << gCursorZ;
+        if (!gDetailView && gFourFloorMode)
+        {
+            stream << " floor=" << (location.sourceFloorIndex + 1);
+        }
+        return stream.str();
+    }
+
     Color3f scaleColor(Color3f color, float amount)
     {
         return {
@@ -352,6 +940,69 @@ namespace
         };
     }
 
+    float focusForRegion(std::int32_t islandIndex, std::int32_t floorIndex)
+    {
+        if (!gIslandMode || !gFourFloorMode)
+        {
+            return 1.0f;
+        }
+
+        return (gActiveIsland == islandIndex && gActiveFloor == floorIndex) ? 1.0f : 0.18f;
+    }
+
+    float focusForDetailSubIsland(std::int32_t subIslandIndex)
+    {
+        if (!gDetailView || !gDetailSubIslandMode || gDetailQuarterView)
+        {
+            return 1.0f;
+        }
+
+        return (gActiveDetailSubIsland == subIslandIndex) ? 1.0f : 0.18f;
+    }
+
+    std::int32_t spiralIslandForStep(std::int32_t spiralIndex)
+    {
+        constexpr std::int32_t kSpiralIslands[4] = {2, 1, 3, 0};
+        return kSpiralIslands[spiralIndex % 4];
+    }
+
+    std::int32_t spiralFloorForStep(std::int32_t spiralIndex)
+    {
+        return kFloorCount - 1 - (spiralIndex / 4);
+    }
+
+    std::int32_t spiralIndexForSelection(std::int32_t islandIndex, std::int32_t floorIndex)
+    {
+        constexpr std::int32_t kSpiralIslands[4] = {2, 1, 3, 0};
+        const auto floorOffset = (kFloorCount - 1 - floorIndex) * 4;
+        for (std::int32_t i = 0; i < 4; ++i)
+        {
+            if (kSpiralIslands[i] == islandIndex)
+            {
+                return floorOffset + i;
+            }
+        }
+        return 0;
+    }
+
+    void setSelectionFromSpiralIndex(std::int32_t spiralIndex)
+    {
+        const auto clamped = std::clamp(spiralIndex, 0, kIslandCount * kFloorCount - 1);
+        gActiveIsland = spiralIslandForStep(clamped);
+        gActiveFloor = spiralFloorForStep(clamped);
+    }
+
+    void resetSelectionToSpiralStart()
+    {
+        setSelectionFromSpiralIndex(0);
+    }
+
+    Color3f applyFocus(Color3f color, float focus)
+    {
+        const auto muted = mixColor(kSkyTop, color, 0.28f);
+        return mixColor(muted, color, focus);
+    }
+
     void setColor(const Color3f& color, float alpha)
     {
         glColor4f(color.r, color.g, color.b, alpha);
@@ -360,69 +1011,6 @@ namespace
     void emitVertex(float x, float y, float z)
     {
         glVertex3f(x, y, z);
-    }
-
-    void appendVertex(std::vector<MeshVertex>& vertices, float x, float y, float z, const Color3f& color)
-    {
-        vertices.push_back({x, y, z, color.r, color.g, color.b});
-    }
-
-    void appendQuad(
-        std::vector<MeshVertex>& vertices,
-        float x0,
-        float y0,
-        float z0,
-        float x1,
-        float y1,
-        float z1,
-        float x2,
-        float y2,
-        float z2,
-        float x3,
-        float y3,
-        float z3,
-        const Color3f& c0,
-        const Color3f& c1,
-        const Color3f& c2,
-        const Color3f& c3)
-    {
-        appendVertex(vertices, x0, y0, z0, c0);
-        appendVertex(vertices, x1, y1, z1, c1);
-        appendVertex(vertices, x2, y2, z2, c2);
-        appendVertex(vertices, x3, y3, z3, c3);
-    }
-
-    void appendSolidQuad(
-        std::vector<MeshVertex>& vertices,
-        float x0,
-        float y0,
-        float z0,
-        float x1,
-        float y1,
-        float z1,
-        float x2,
-        float y2,
-        float z2,
-        float x3,
-        float y3,
-        float z3,
-        const Color3f& color)
-    {
-        appendQuad(vertices, x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3, color, color, color, color);
-    }
-
-    void appendLine(
-        std::vector<MeshVertex>& vertices,
-        float x0,
-        float y0,
-        float z0,
-        float x1,
-        float y1,
-        float z1,
-        const Color3f& color)
-    {
-        appendVertex(vertices, x0, y0, z0, color);
-        appendVertex(vertices, x1, y1, z1, color);
     }
 
     void drawScreenQuad(float x0, float y0, float x1, float y1, const Color3f& top, const Color3f& bottom, float alpha)
@@ -524,14 +1112,14 @@ namespace
         const float maxX = originX + static_cast<float>(width) * kCubeSize;
         const float maxY = originY + static_cast<float>(depth) * kCubeSize;
 
-        for (std::int32_t x = 0; x <= width; x += 8)
+        for (std::int32_t x = 0; x <= width; ++x)
         {
             const float xf = originX + static_cast<float>(x) * kCubeSize;
             emitVertex(xf, originY, z);
             emitVertex(xf, maxY, z);
         }
 
-        for (std::int32_t y = 0; y <= depth; y += 8)
+        for (std::int32_t y = 0; y <= depth; ++y)
         {
             const float yf = originY + static_cast<float>(y) * kCubeSize;
             emitVertex(originX, yf, z);
@@ -547,16 +1135,17 @@ namespace
         float originY,
         std::int32_t width,
         std::int32_t depth,
-        std::int32_t floorIndex)
+        std::int32_t floorIndex,
+        float focus)
     {
         const float maxX = originX + static_cast<float>(width) * kCubeSize;
         const float maxY = originY + static_cast<float>(depth) * kCubeSize;
         const float topZ = floorBaseZ(floorIndex);
         const float bottomZ = topZ - kSlabThickness;
         const float sideTopZ = topZ - 0.12f;
-        const auto topColor = Color3f{0.05f, 0.07f, 0.14f};
-        const auto eastColor = Color3f{0.11f, 0.16f, 0.30f};
-        const auto northColor = Color3f{0.08f, 0.11f, 0.22f};
+        const auto topColor = applyFocus(Color3f{0.05f, 0.07f, 0.14f}, focus);
+        const auto eastColor = applyFocus(Color3f{0.11f, 0.16f, 0.30f}, focus);
+        const auto northColor = applyFocus(Color3f{0.08f, 0.11f, 0.22f}, focus);
 
         glBegin(GL_QUADS);
         setColor(topColor, 1.0f);
@@ -566,7 +1155,26 @@ namespace
         emitVertex(originX, maxY, topZ);
         glEnd();
 
-        drawPlatformGrid(originX, originY, width, depth, topZ + 0.02f);
+        glLineWidth(1.0f);
+        glBegin(GL_LINES);
+        setColor(applyFocus(Color3f{0.23f, 0.29f, 0.43f}, focus), 0.24f + 0.16f * focus);
+
+        for (std::int32_t x = 0; x <= width; ++x)
+        {
+            const float xf = originX + static_cast<float>(x) * kCubeSize;
+            emitVertex(xf, originY, topZ + 0.02f);
+            emitVertex(xf, maxY, topZ + 0.02f);
+        }
+
+        for (std::int32_t y = 0; y <= depth; ++y)
+        {
+            const float yf = originY + static_cast<float>(y) * kCubeSize;
+            emitVertex(originX, yf, topZ + 0.02f);
+            emitVertex(maxX, yf, topZ + 0.02f);
+        }
+
+        glEnd();
+        glLineWidth(1.0f);
 
         glBegin(GL_QUADS);
         setColor(eastColor, 1.0f);
@@ -585,11 +1193,6 @@ namespace
         glEnd();
     }
 
-    bool cubeExistsAtLocalLayer(std::int32_t sourceFloorIndex, std::int32_t x, std::int32_t y, std::int32_t localLayer)
-    {
-        return blockHeight(sourceFloorIndex, x, y) >= localLayer;
-    }
-
     bool cubeExistsInBand(
         std::int32_t sourceFloorIndex,
         std::int32_t x,
@@ -603,7 +1206,7 @@ namespace
             return false;
         }
 
-        return cubeExistsAtLocalLayer(sourceFloorIndex, x, y, localLayer) && isLayerAllowed(layerStart + localLayer - 1);
+        return blockExists(sourceFloorIndex, x, y, localLayer - 1);
     }
 
     bool cubeExistsInPatchBand(
@@ -626,50 +1229,7 @@ namespace
         return cubeExistsInBand(sourceFloorIndex, x, y, layerStart, layerCount, localLayer);
     }
 
-    void appendPlatformGrid(std::vector<MeshVertex>& lines, float originX, float originY, std::int32_t width, std::int32_t depth, float z)
-    {
-        const auto color = Color3f{0.23f, 0.29f, 0.43f};
-        const float maxX = originX + static_cast<float>(width) * kCubeSize;
-        const float maxY = originY + static_cast<float>(depth) * kCubeSize;
-
-        for (std::int32_t x = 0; x <= width; ++x)
-        {
-            const float xf = originX + static_cast<float>(x) * kCubeSize;
-            appendLine(lines, xf, originY, z, xf, maxY, z, color);
-        }
-
-        for (std::int32_t y = 0; y <= depth; ++y)
-        {
-            const float yf = originY + static_cast<float>(y) * kCubeSize;
-            appendLine(lines, originX, yf, z, maxX, yf, z, color);
-        }
-    }
-
-    void appendPlatformPatch(
-        SceneMesh& mesh,
-        float originX,
-        float originY,
-        std::int32_t width,
-        std::int32_t depth,
-        std::int32_t floorIndex)
-    {
-        const float maxX = originX + static_cast<float>(width) * kCubeSize;
-        const float maxY = originY + static_cast<float>(depth) * kCubeSize;
-        const float topZ = floorBaseZ(floorIndex);
-        const float bottomZ = topZ - kSlabThickness;
-        const float sideTopZ = topZ - 0.12f;
-        const auto topColor = Color3f{0.05f, 0.07f, 0.14f};
-        const auto eastColor = Color3f{0.11f, 0.16f, 0.30f};
-        const auto northColor = Color3f{0.08f, 0.11f, 0.22f};
-
-        appendSolidQuad(mesh.quads, originX, originY, topZ, maxX, originY, topZ, maxX, maxY, topZ, originX, maxY, topZ, topColor);
-        appendPlatformGrid(mesh.lines, originX, originY, width, depth, topZ + 0.02f);
-        appendSolidQuad(mesh.quads, maxX, originY, bottomZ, maxX, maxY, bottomZ, maxX, maxY, sideTopZ, maxX, originY, sideTopZ, eastColor);
-        appendSolidQuad(mesh.quads, originX, maxY, bottomZ, maxX, maxY, bottomZ, maxX, maxY, sideTopZ, originX, maxY, sideTopZ, northColor);
-    }
-
-    void appendBlockPatch(
-        SceneMesh& mesh,
+    void drawBlockPatchImmediate(
         std::int32_t sourceFloorIndex,
         std::int32_t sourceStartX,
         std::int32_t sourceStartY,
@@ -679,7 +1239,8 @@ namespace
         float originY,
         std::int32_t floorIndex,
         std::int32_t layerStart,
-        std::int32_t layerCount)
+        std::int32_t layerCount,
+        float focus)
     {
         const float baseZ = floorBaseZ(floorIndex);
 
@@ -694,7 +1255,7 @@ namespace
 
                 for (std::int32_t localLayer = 1; localLayer <= layerCount; ++localLayer)
                 {
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX, srcY, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY, layerStart, layerCount, localLayer))
                     {
                         continue;
                     }
@@ -702,70 +1263,38 @@ namespace
                     const auto absoluteLayer = layerStart + localLayer - 1;
                     const float z0 = baseZ + static_cast<float>(localLayer - 1) * kCubeSize;
                     const float z1 = baseZ + static_cast<float>(localLayer) * kCubeSize;
+                    const auto faceColor = applyFocus(levelColor(absoluteLayer), focus);
 
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX, srcY, layerStart, layerCount, localLayer + 1))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY, layerStart, layerCount, localLayer + 1))
                     {
-                        appendSolidQuad(mesh.quads, xf, yf, z1, xf + kCubeSize, yf, z1, xf + kCubeSize, yf + kCubeSize, z1, xf, yf + kCubeSize, z1, levelColor(absoluteLayer));
+                        drawQuadTop(xf, yf, z1, faceColor);
                     }
 
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX + 1, srcY, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX + 1, srcY, layerStart, layerCount, localLayer))
                     {
-                        const auto shadeA = scaleColor(levelColor(absoluteLayer), 0.58f);
-                        const auto shadeB = scaleColor(levelColor(absoluteLayer), 0.75f);
-                        appendQuad(
-                            mesh.quads,
-                            xf + kCubeSize, yf, z0,
-                            xf + kCubeSize, yf + kCubeSize, z0,
-                            xf + kCubeSize, yf + kCubeSize, z1,
-                            xf + kCubeSize, yf, z1,
-                            shadeA, shadeA, shadeB, shadeB);
+                        drawQuadEast(xf + kCubeSize, yf, z0, z1, faceColor);
                     }
 
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX, srcY + 1, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY + 1, layerStart, layerCount, localLayer))
                     {
-                        const auto shadeA = scaleColor(levelColor(absoluteLayer), 0.48f);
-                        const auto shadeB = scaleColor(levelColor(absoluteLayer), 0.65f);
-                        appendQuad(
-                            mesh.quads,
-                            xf, yf + kCubeSize, z0,
-                            xf + kCubeSize, yf + kCubeSize, z0,
-                            xf + kCubeSize, yf + kCubeSize, z1,
-                            xf, yf + kCubeSize, z1,
-                            shadeA, shadeA, shadeB, shadeB);
+                        drawQuadNorth(xf, xf + kCubeSize, yf + kCubeSize, z0, z1, faceColor);
                     }
 
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX - 1, srcY, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX - 1, srcY, layerStart, layerCount, localLayer))
                     {
-                        const auto shadeA = scaleColor(levelColor(absoluteLayer), 0.54f);
-                        const auto shadeB = scaleColor(levelColor(absoluteLayer), 0.70f);
-                        appendQuad(
-                            mesh.quads,
-                            xf, yf + kCubeSize, z0,
-                            xf, yf, z0,
-                            xf, yf, z1,
-                            xf, yf + kCubeSize, z1,
-                            shadeA, shadeA, shadeB, shadeB);
+                        drawQuadEast(xf, yf, z1, z0, faceColor);
                     }
 
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX, srcY - 1, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY - 1, layerStart, layerCount, localLayer))
                     {
-                        const auto shadeA = scaleColor(levelColor(absoluteLayer), 0.44f);
-                        const auto shadeB = scaleColor(levelColor(absoluteLayer), 0.60f);
-                        appendQuad(
-                            mesh.quads,
-                            xf + kCubeSize, yf, z0,
-                            xf, yf, z0,
-                            xf, yf, z1,
-                            xf + kCubeSize, yf, z1,
-                            shadeA, shadeA, shadeB, shadeB);
+                        drawQuadNorth(xf + kCubeSize, xf, yf, z1, z0, faceColor);
                     }
                 }
             }
         }
     }
 
-    void appendTopLinesPatch(
-        SceneMesh& mesh,
+    void drawTopLinesPatchImmediate(
         std::int32_t sourceFloorIndex,
         std::int32_t sourceStartX,
         std::int32_t sourceStartY,
@@ -775,11 +1304,12 @@ namespace
         float originY,
         std::int32_t floorIndex,
         std::int32_t layerStart,
-        std::int32_t layerCount)
+        std::int32_t layerCount,
+        float focus)
     {
         const float baseZ = floorBaseZ(floorIndex);
         constexpr float kLineLift = 0.06f;
-        const auto color = Color3f{0.03f, 0.05f, 0.10f};
+        const auto color = applyFocus(Color3f{0.03f, 0.05f, 0.10f}, focus);
 
         for (std::int32_t localY = 0; localY < depth; ++localY)
         {
@@ -792,84 +1322,68 @@ namespace
 
                 for (std::int32_t localLayer = 1; localLayer <= layerCount; ++localLayer)
                 {
-                    if (!cubeExistsInBand(sourceFloorIndex, srcX, srcY, layerStart, layerCount, localLayer))
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY, layerStart, layerCount, localLayer))
                     {
                         continue;
                     }
 
-                    if (cubeExistsInBand(sourceFloorIndex, srcX, srcY, layerStart, layerCount, localLayer + 1))
+                    if (cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY, layerStart, layerCount, localLayer + 1))
                     {
                         continue;
                     }
 
                     const float zf = baseZ + static_cast<float>(localLayer) * kCubeSize + kLineLift;
-                    appendLine(mesh.lines, xf, yf, zf, xf + kCubeSize, yf, zf, color);
-                    appendLine(mesh.lines, xf + kCubeSize, yf, zf, xf + kCubeSize, yf + kCubeSize, zf, color);
-                    appendLine(mesh.lines, xf + kCubeSize, yf + kCubeSize, zf, xf, yf + kCubeSize, zf, color);
-                    appendLine(mesh.lines, xf, yf + kCubeSize, zf, xf, yf, zf, color);
+                    glBegin(GL_LINE_LOOP);
+                    setColor(color, 0.35f + 0.65f * focus);
+                    emitVertex(xf, yf, zf);
+                    emitVertex(xf + kCubeSize, yf, zf);
+                    emitVertex(xf + kCubeSize, yf + kCubeSize, zf);
+                    emitVertex(xf, yf + kCubeSize, zf);
+                    glEnd();
                 }
             }
         }
     }
 
-    void rebuildSceneMesh()
+    void drawBuildMarker()
     {
-        SceneMesh mesh;
-
-        if (!gIslandMode)
-        {
-            for (std::int32_t floorIndex = 0; floorIndex < activeFloorCount(); ++floorIndex)
-            {
-                appendPlatformPatch(mesh, 0.0f, 0.0f, kGridWidth, kGridDepth, floorIndex);
-                appendBlockPatch(mesh, floorIndex, 0, 0, kGridWidth, kGridDepth, 0.0f, 0.0f, floorIndex, 1, kGridHeight);
-                appendTopLinesPatch(mesh, floorIndex, 0, 0, kGridWidth, kGridDepth, 0.0f, 0.0f, floorIndex, 1, kGridHeight);
-            }
-        }
-        else
-        {
-            for (std::int32_t islandIndex = 0; islandIndex < kIslandCount; ++islandIndex)
-            {
-                const float originX = islandOriginX(islandIndex);
-                const float originY = islandOriginY(islandIndex);
-                const auto sourceStartX = islandSourceStartX(islandIndex);
-                const auto sourceStartY = islandSourceStartY(islandIndex);
-
-                if (!gFourFloorMode)
-                {
-                    appendPlatformPatch(mesh, originX, originY, kIslandSize, kIslandSize, 0);
-                    appendBlockPatch(mesh, islandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, 0, 1, kGridHeight);
-                    appendTopLinesPatch(mesh, islandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, 0, 1, kGridHeight);
-                    continue;
-                }
-
-                for (std::int32_t bandIndex = 0; bandIndex < kFloorCount; ++bandIndex)
-                {
-                    appendPlatformPatch(mesh, originX, originY, kIslandSize, kIslandSize, bandIndex);
-                    appendBlockPatch(mesh, bandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, bandIndex, 1 + bandIndex * kPitchBandHeight, kPitchBandHeight);
-                    appendTopLinesPatch(mesh, bandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, bandIndex, 1 + bandIndex * kPitchBandHeight, kPitchBandHeight);
-                }
-            }
-        }
-
-        gSceneMesh = std::move(mesh);
-        gSceneMeshDirty = false;
-    }
-
-    void renderMeshVertices(const std::vector<MeshVertex>& vertices, GLenum mode)
-    {
-        if (vertices.empty())
+        const auto location = currentCursorLocation();
+        if (!location.valid)
         {
             return;
         }
 
-        const auto* data = vertices.data();
-        glEnableClientState(GL_VERTEX_ARRAY);
-        glEnableClientState(GL_COLOR_ARRAY);
-        glVertexPointer(3, GL_FLOAT, sizeof(MeshVertex), reinterpret_cast<const GLvoid*>(&data->x));
-        glColorPointer(3, GL_FLOAT, sizeof(MeshVertex), reinterpret_cast<const GLvoid*>(&data->r));
-        glDrawArrays(mode, 0, static_cast<GLsizei>(vertices.size()));
-        glDisableClientState(GL_COLOR_ARRAY);
-        glDisableClientState(GL_VERTEX_ARRAY);
+        constexpr float kLift = 0.08f;
+        const float x0 = location.originX;
+        const float y0 = location.originY;
+        const float x1 = x0 + kCubeSize;
+        const float y1 = y0 + kCubeSize;
+        const float z = location.markerBaseZ + kLift;
+        const float guideBase = location.guideBaseZ + 0.02f;
+        const auto outline = Color3f{0.20f, 0.95f, 0.98f};
+        const auto guide = Color3f{0.18f, 0.75f, 0.96f};
+
+        glLineWidth(2.0f);
+        glBegin(GL_LINE_LOOP);
+        setColor(outline, 1.0f);
+        emitVertex(x0, y0, z);
+        emitVertex(x1, y0, z);
+        emitVertex(x1, y1, z);
+        emitVertex(x0, y1, z);
+        glEnd();
+
+        glBegin(GL_LINES);
+        setColor(guide, 0.75f);
+        emitVertex(x0, y0, z);
+        emitVertex(x0, y0, guideBase);
+        emitVertex(x1, y0, z);
+        emitVertex(x1, y0, guideBase);
+        emitVertex(x1, y1, z);
+        emitVertex(x1, y1, guideBase);
+        emitVertex(x0, y1, z);
+        emitVertex(x0, y1, guideBase);
+        glEnd();
+        glLineWidth(1.0f);
     }
 
     void setProjection()
@@ -945,8 +1459,8 @@ namespace
 
         glBegin(GL_QUADS);
         glColor4f(0.03f, 0.04f, 0.07f, 0.76f);
-        glVertex2f(22.0f, static_cast<float>(gWindowHeight) - 146.0f);
-        glVertex2f(980.0f, static_cast<float>(gWindowHeight) - 146.0f);
+        glVertex2f(22.0f, static_cast<float>(gWindowHeight) - 168.0f);
+        glVertex2f(980.0f, static_cast<float>(gWindowHeight) - 168.0f);
         glColor4f(0.08f, 0.10f, 0.16f, 0.88f);
         glVertex2f(980.0f, static_cast<float>(gWindowHeight) - 20.0f);
         glVertex2f(22.0f, static_cast<float>(gWindowHeight) - 20.0f);
@@ -957,11 +1471,20 @@ namespace
         glColor4f(0.72f, 0.79f, 0.93f, 0.92f);
         const std::string mode = gFourFloorMode ? "Mode: 4 floors" : "Mode: 1 floor";
         const std::string layout = gIslandMode ? "Layout: 4 islands" : "Layout: full grid";
-        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 66.0f, GLUT_BITMAP_HELVETICA_12, mode + "   " + layout + "   ,/. rotate   F switch   G islands   N regenerate   K key   S scale   =/- zoom   0 reset");
+        const std::string view = gDetailView ? "View: focused" : "View: stage";
+        const std::string gMode = gDetailView ? "G split-focus" : "G islands";
+        const std::string controls = splitIslandViewActive()
+            ? "arrows select   Enter focus   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset"
+            : "WASD move   Q/E z   R place   T remove   Enter focus   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset";
+        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 66.0f, GLUT_BITMAP_HELVETICA_12, mode + "   " + layout + "   " + view + "   " + controls);
         glColor4f(0.62f, 0.72f, 0.88f, 0.90f);
         drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 88.0f, GLUT_BITMAP_HELVETICA_12, pitchCycleSummary());
         glColor4f(0.78f, 0.84f, 0.96f, 0.92f);
-        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 110.0f, GLUT_BITMAP_HELVETICA_12, quantizerSummary());
+        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 110.0f, GLUT_BITMAP_HELVETICA_12, buildStatusSummary());
+        glColor4f(0.86f, 0.90f, 0.98f, 0.94f);
+        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 132.0f, GLUT_BITMAP_HELVETICA_12, activeSelectionSummary());
+        glColor4f(0.73f, 0.82f, 0.98f, 0.92f);
+        drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 154.0f, GLUT_BITMAP_HELVETICA_12, gSaveStatus);
 
         glPopMatrix();
         glMatrixMode(GL_PROJECTION);
@@ -969,13 +1492,106 @@ namespace
         glMatrixMode(GL_MODELVIEW);
     }
 
-    void display()
+    void drawSceneImmediate()
     {
-        if (gSceneMeshDirty)
+        if (gDetailView)
         {
-            rebuildSceneMesh();
+            const auto sourceStartX = islandSourceStartX(gActiveIsland);
+            const auto sourceStartY = islandSourceStartY(gActiveIsland);
+            const auto layerStart = 1 + gActiveFloor * kPitchBandHeight;
+
+            if (!gDetailSubIslandMode)
+            {
+                drawPlatform(0.0f, 0.0f, kIslandSize, kIslandSize, 0, 1.0f);
+                drawBlockPatchImmediate(gActiveFloor, sourceStartX, sourceStartY, kIslandSize, kIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                drawTopLinesPatchImmediate(gActiveFloor, sourceStartX, sourceStartY, kIslandSize, kIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                return;
+            }
+
+            if (gDetailQuarterView)
+            {
+                const auto subSourceStartX = sourceStartX + (gActiveDetailSubIsland % 2) * kFocusedSubIslandSize;
+                const auto subSourceStartY = sourceStartY + (gActiveDetailSubIsland / 2) * kFocusedSubIslandSize;
+                drawPlatform(0.0f, 0.0f, kFocusedSubIslandSize, kFocusedSubIslandSize, 0, 1.0f);
+                drawBlockPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                drawTopLinesPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                return;
+            }
+
+            for (std::int32_t subIslandIndex = 0; subIslandIndex < kFocusedSubIslandCount; ++subIslandIndex)
+            {
+                const auto subSourceStartX = sourceStartX + (subIslandIndex % 2) * kFocusedSubIslandSize;
+                const auto subSourceStartY = sourceStartY + (subIslandIndex / 2) * kFocusedSubIslandSize;
+                const float originX = focusedSubIslandOriginX(subIslandIndex);
+                const float originY = focusedSubIslandOriginY(subIslandIndex);
+                const float focus = focusForDetailSubIsland(subIslandIndex);
+                drawPlatform(originX, originY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0, focus);
+                drawBlockPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, originX, originY, 0, layerStart, kPitchBandHeight, focus);
+                drawTopLinesPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, originX, originY, 0, layerStart, kPitchBandHeight, focus);
+            }
+            return;
         }
 
+        if (!gIslandMode)
+        {
+            for (std::int32_t floorIndex = 0; floorIndex < activeFloorCount(); ++floorIndex)
+            {
+                drawPlatform(0.0f, 0.0f, kGridWidth, kGridDepth, floorIndex, 1.0f);
+                drawBlockPatchImmediate(floorIndex, 0, 0, kGridWidth, kGridDepth, 0.0f, 0.0f, floorIndex, 1, kGridHeight, 1.0f);
+                drawTopLinesPatchImmediate(floorIndex, 0, 0, kGridWidth, kGridDepth, 0.0f, 0.0f, floorIndex, 1, kGridHeight, 1.0f);
+            }
+            return;
+        }
+
+        for (std::int32_t islandIndex = 0; islandIndex < kIslandCount; ++islandIndex)
+        {
+            const float originX = islandOriginX(islandIndex);
+            const float originY = islandOriginY(islandIndex);
+            const auto sourceStartX = islandSourceStartX(islandIndex);
+            const auto sourceStartY = islandSourceStartY(islandIndex);
+
+            if (!gFourFloorMode)
+            {
+                drawPlatform(originX, originY, kIslandSize, kIslandSize, 0, 1.0f);
+                drawBlockPatchImmediate(islandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, 0, 1, kGridHeight, 1.0f);
+                drawTopLinesPatchImmediate(islandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, 0, 1, kGridHeight, 1.0f);
+                continue;
+            }
+
+            for (std::int32_t bandIndex = 0; bandIndex < kFloorCount; ++bandIndex)
+            {
+                const float focus = focusForRegion(islandIndex, bandIndex);
+                drawPlatform(originX, originY, kIslandSize, kIslandSize, bandIndex, focus);
+                drawBlockPatchImmediate(bandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, bandIndex, 1 + bandIndex * kPitchBandHeight, kPitchBandHeight, focus);
+                drawTopLinesPatchImmediate(bandIndex, sourceStartX, sourceStartY, kIslandSize, kIslandSize, originX, originY, bandIndex, 1 + bandIndex * kPitchBandHeight, kPitchBandHeight, focus);
+            }
+        }
+    }
+
+    void clampActiveSelection()
+    {
+        gActiveIsland = std::clamp(gActiveIsland, 0, kIslandCount - 1);
+        gActiveFloor = std::clamp(gActiveFloor, 0, kFloorCount - 1);
+    }
+
+    void syncActiveSelection()
+    {
+        if (!gIslandMode || !gFourFloorMode)
+        {
+            gDetailView = false;
+            gDetailSubIslandMode = false;
+            gDetailQuarterView = false;
+            clampBuildCursor();
+            return;
+        }
+
+        clampActiveSelection();
+        setSelectionFromSpiralIndex(spiralIndexForSelection(gActiveIsland, gActiveFloor));
+        clampBuildCursor();
+    }
+
+    void display()
+    {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         drawBackdrop();
         setProjection();
@@ -987,12 +1603,9 @@ namespace
         glEnable(GL_POLYGON_OFFSET_FILL);
         glPolygonOffset(1.0f, 1.0f);
 
-        renderMeshVertices(gSceneMesh.quads, GL_QUADS);
+        drawSceneImmediate();
         glDisable(GL_POLYGON_OFFSET_FILL);
-
-        glDepthMask(GL_FALSE);
-        renderMeshVertices(gSceneMesh.lines, GL_LINES);
-        glDepthMask(GL_TRUE);
+        drawBuildMarker();
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1005,12 +1618,55 @@ namespace
     {
         gWindowWidth = std::max(width, 1);
         gWindowHeight = std::max(height, 1);
+        syncActiveSelection();
         glutPostRedisplay();
     }
 
     void keyboard(unsigned char key, int, int)
     {
-        if (key == kKeyEquals)
+        const auto buildContext = currentBuildContext();
+
+        if (buildContext.valid && (key == kKeyWLower || key == kKeyWUpper))
+        {
+            gCursorY = std::max(gCursorY - 1, 0);
+        }
+        else if (buildContext.valid && (key == kKeySLower || key == kKeySUpper))
+        {
+            gCursorY = std::min(gCursorY + 1, buildContext.depth - 1);
+        }
+        else if (buildContext.valid && (key == kKeyALower || key == kKeyAUpper))
+        {
+            gCursorX = std::max(gCursorX - 1, 0);
+        }
+        else if (buildContext.valid && (key == kKeyDLower || key == kKeyDUpper))
+        {
+            gCursorX = std::min(gCursorX + 1, buildContext.width - 1);
+        }
+        else if (buildContext.valid && (key == kKeyQLower || key == kKeyQUpper))
+        {
+            gCursorZ = std::max(gCursorZ - 1, 0);
+        }
+        else if (buildContext.valid && (key == kKeyELower || key == kKeyEUpper))
+        {
+            gCursorZ = std::min(gCursorZ + 1, buildContext.totalLayers - 1);
+        }
+        else if (buildContext.valid && (key == kKeyRLower || key == kKeyRUpper))
+        {
+            const auto location = currentCursorLocation();
+            if (location.valid)
+            {
+                setBlock(location.sourceFloorIndex, location.sourceX, location.sourceY, location.localZ, true);
+            }
+        }
+        else if (buildContext.valid && (key == kKeyTLower || key == kKeyTUpper))
+        {
+            const auto location = currentCursorLocation();
+            if (location.valid)
+            {
+                setBlock(location.sourceFloorIndex, location.sourceX, location.sourceY, location.localZ, false);
+            }
+        }
+        else if (key == kKeyEquals)
         {
             gZoom = std::min(gZoom * 1.25f, kMaxZoom);
         }
@@ -1022,31 +1678,105 @@ namespace
         {
             gZoom = kMinZoom;
         }
+        else if (key == kKeyEnter)
+        {
+            if (gDetailView && gDetailSubIslandMode && !gDetailQuarterView)
+            {
+                gDetailQuarterView = true;
+                gZoom = kMinZoom;
+            }
+            else if (gIslandMode && gFourFloorMode && !gDetailView)
+            {
+                gDetailView = true;
+                gDetailSubIslandMode = false;
+                gDetailQuarterView = false;
+                gZoom = kMinZoom;
+            }
+        }
         else if (key == kKeyFLower || key == kKeyFUpper)
         {
             gFourFloorMode = !gFourFloorMode;
-            gSceneMeshDirty = true;
+            gDetailView = false;
+            gDetailSubIslandMode = false;
+            gDetailQuarterView = false;
+            if (gIslandMode && gFourFloorMode)
+            {
+                resetSelectionToSpiralStart();
+            }
         }
         else if (key == kKeyNLower || key == kKeyNUpper)
         {
             gSeed = hashU32(gSeed + 0x9e3779b9u);
             regenerateBlocks();
-            gSceneMeshDirty = true;
-        }
-        else if (key == kKeyGLower || key == kKeyGUpper)
-        {
-            gIslandMode = !gIslandMode;
-            gSceneMeshDirty = true;
         }
         else if (key == kKeyKLower || key == kKeyKUpper)
         {
-            gSelectedKey = (gSelectedKey + 1) % 12;
-            gSceneMeshDirty = true;
+            const auto path = chooseSavePath();
+            if (path.empty())
+            {
+                gSaveStatus = "Save canceled";
+            }
+            else if (saveWorldToFile(path))
+            {
+                gSavePath = path;
+                gAutosaveEnabled = true;
+                gSaveStatus = "Save: " + path;
+            }
+            else
+            {
+                gSaveStatus = "Save failed: " + path;
+            }
         }
-        else if (key == kKeySLower || key == kKeySUpper)
+        else if (key == kKeyLLower || key == kKeyLUpper)
+        {
+            const auto path = !gSavePath.empty() ? gSavePath : latestSavePath();
+            if (path.empty())
+            {
+                gSaveStatus = "Load failed: no .drd file";
+            }
+            else if (loadWorldFromFile(path))
+            {
+                gSavePath = path;
+                gAutosaveEnabled = true;
+                gSaveStatus = "Load: " + path;
+            }
+            else
+            {
+                gSaveStatus = "Load failed: " + path;
+            }
+        }
+        else if (key == kKeyGLower || key == kKeyGUpper)
+        {
+            if (gDetailView)
+            {
+                if (!gDetailQuarterView)
+                {
+                    gDetailSubIslandMode = !gDetailSubIslandMode;
+                    if (!gDetailSubIslandMode)
+                    {
+                        gActiveDetailSubIsland = 0;
+                    }
+                }
+            }
+            else
+            {
+                gIslandMode = !gIslandMode;
+                gDetailView = false;
+                gDetailSubIslandMode = false;
+                gDetailQuarterView = false;
+                if (gIslandMode && gFourFloorMode)
+                {
+                    resetSelectionToSpiralStart();
+                }
+            }
+        }
+        else if (key == kKeyJLower || key == kKeyJUpper)
+        {
+            gSelectedKey = (gSelectedKey + 1) % 12;
+        }
+        else if (key == kKeyULower || key == kKeyUUpper)
         {
             gSelectedScale = (gSelectedScale + 1) % (sizeof(kScaleDefinitions) / sizeof(kScaleDefinitions[0]));
-            gSceneMeshDirty = true;
         }
         else if (key == kKeyComma)
         {
@@ -1058,9 +1788,86 @@ namespace
         }
         else if (key == kKeyEscape)
         {
-            std::exit(0);
+            if (gDetailQuarterView)
+            {
+                gDetailQuarterView = false;
+            }
+            else if (gDetailView)
+            {
+                gDetailView = false;
+                gDetailSubIslandMode = false;
+                gDetailQuarterView = false;
+            }
+            else
+            {
+                gDetailView = false;
+                gDetailSubIslandMode = false;
+                gDetailQuarterView = false;
+            }
         }
 
+        syncActiveSelection();
+        glutPostRedisplay();
+    }
+
+    void special(int key, int, int)
+    {
+        if (currentBuildContext().valid)
+        {
+            return;
+        }
+
+        if (gDetailView && gDetailSubIslandMode && !gDetailQuarterView)
+        {
+            auto subIsland = gActiveDetailSubIsland;
+
+            if (key == kSpecialLeft && (subIsland % 2) == 1)
+            {
+                subIsland -= 1;
+            }
+            else if (key == kSpecialRight && (subIsland % 2) == 0)
+            {
+                subIsland += 1;
+            }
+            else if (key == kSpecialUp && subIsland >= 2)
+            {
+                subIsland -= 2;
+            }
+            else if (key == kSpecialDown && subIsland < 2)
+            {
+                subIsland += 2;
+            }
+            else
+            {
+                return;
+            }
+
+            gActiveDetailSubIsland = std::clamp(subIsland, 0, kFocusedSubIslandCount - 1);
+            glutPostRedisplay();
+            return;
+        }
+
+        if (!gIslandMode || !gFourFloorMode)
+        {
+            return;
+        }
+
+        auto spiralIndex = spiralIndexForSelection(gActiveIsland, gActiveFloor);
+
+        if (key == kSpecialLeft || key == kSpecialUp)
+        {
+            spiralIndex = (spiralIndex + (kIslandCount * kFloorCount) - 1) % (kIslandCount * kFloorCount);
+        }
+        else if (key == kSpecialRight || key == kSpecialDown)
+        {
+            spiralIndex = (spiralIndex + 1) % (kIslandCount * kFloorCount);
+        }
+        else
+        {
+            return;
+        }
+
+        setSelectionFromSpiralIndex(spiralIndex);
         glutPostRedisplay();
     }
 }
@@ -1079,7 +1886,8 @@ int main(int argc, char** argv)
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
-    glutIdleFunc(display);
+    glutSpecialFunc(special);
+    glutTimerFunc(kAutosaveIntervalMs, autosaveCallback, 0);
 
     glutMainLoop();
     return 0;
