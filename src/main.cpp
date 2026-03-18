@@ -133,6 +133,7 @@ namespace
     bool gDetailView = false;
     bool gDetailSubIslandMode = false;
     bool gDetailQuarterView = false;
+    bool gDetailTopDownView = false;
     bool gTitleScreen = true;
     bool gTitlePreviewMode = false;
     std::int32_t gTitleMenuSelection = 2;
@@ -194,6 +195,7 @@ namespace
     std::int32_t islandSourceStartX(std::int32_t islandIndex);
     std::int32_t islandSourceStartY(std::int32_t islandIndex);
     std::string latestSavePath();
+    Color3f hsvColor(float h, float s, float v);
     void drawSceneImmediate();
     std::int32_t titleMenuIndexAt(float x, float y);
 
@@ -452,6 +454,7 @@ namespace
         gDetailView = false;
         gDetailSubIslandMode = false;
         gDetailQuarterView = false;
+        gDetailTopDownView = false;
         gActiveIsland = 2;
         gActiveFloor = kFloorCount - 1;
         gActiveDetailSubIsland = 0;
@@ -548,6 +551,7 @@ namespace
         gDetailView = header.detailView != 0;
         gDetailSubIslandMode = header.detailSubIslandMode != 0;
         gDetailQuarterView = header.detailQuarterView != 0;
+        gDetailTopDownView = false;
         gActiveIsland = std::clamp(header.activeIsland, 0, kIslandCount - 1);
         gActiveFloor = std::clamp(header.activeFloor, 0, kFloorCount - 1);
         gActiveDetailSubIsland = std::clamp(header.activeDetailSubIsland, 0, kFocusedSubIslandCount - 1);
@@ -898,7 +902,8 @@ namespace
 
     Color3f levelColor(std::int32_t z)
     {
-        return kLevelPalette[(z - 1) % 12];
+        const float hue = std::fmod(static_cast<float>((z - 1) % 12) / 12.0f + 1.0f, 1.0f);
+        return hsvColor(hue, 0.7f, 0.95f);
     }
 
     const char* levelPitchClass(std::int32_t z)
@@ -1027,6 +1032,52 @@ namespace
             a.g + (b.g - a.g) * t,
             a.b + (b.b - a.b) * t
         };
+    }
+
+    Color3f hsvColor(float h, float s, float v)
+    {
+        const float wrapped = h - std::floor(h);
+        const float scaled = wrapped * 6.0f;
+        const float c = v * s;
+        const float x = c * (1.0f - std::fabs(std::fmod(scaled, 2.0f) - 1.0f));
+        const float m = v - c;
+
+        float r1 = 0.0f;
+        float g1 = 0.0f;
+        float b1 = 0.0f;
+
+        if (scaled < 1.0f)
+        {
+            r1 = c;
+            g1 = x;
+        }
+        else if (scaled < 2.0f)
+        {
+            r1 = x;
+            g1 = c;
+        }
+        else if (scaled < 3.0f)
+        {
+            g1 = c;
+            b1 = x;
+        }
+        else if (scaled < 4.0f)
+        {
+            g1 = x;
+            b1 = c;
+        }
+        else if (scaled < 5.0f)
+        {
+            r1 = x;
+            b1 = c;
+        }
+        else
+        {
+            r1 = c;
+            b1 = x;
+        }
+
+        return {r1 + m, g1 + m, b1 + m};
     }
 
     float focusForRegion(std::int32_t islandIndex, std::int32_t floorIndex)
@@ -1444,6 +1495,139 @@ namespace
         }
     }
 
+    void drawPerformancePatch(
+        std::int32_t sourceFloorIndex,
+        std::int32_t sourceStartX,
+        std::int32_t sourceStartY,
+        std::int32_t width,
+        std::int32_t depth,
+        float originX,
+        float originY,
+        std::int32_t floorIndex,
+        std::int32_t layerStart,
+        std::int32_t layerCount)
+    {
+        const float boardZ = floorBaseZ(floorIndex) + 0.06f;
+        const float overlayZ = boardZ + 0.02f;
+        const auto boardBase = Color3f{0.06f, 0.09f, 0.15f};   // 0xff0f1725
+        const auto boardOutline = Color3f{0.21f, 0.31f, 0.42f}; // 0xff36506c
+        const auto cellBase = Color3f{0.07f, 0.10f, 0.16f};    // 0xff111a2a
+        const auto cellOutline = Color3f{0.21f, 0.31f, 0.42f}; // 0xff36506c
+
+        glBegin(GL_QUADS);
+        setColor(boardBase, 0.98f);
+        emitVertex(originX, originY, boardZ);
+        emitVertex(originX + static_cast<float>(width) * kCubeSize, originY, boardZ);
+        emitVertex(originX + static_cast<float>(width) * kCubeSize, originY + static_cast<float>(depth) * kCubeSize, boardZ);
+        emitVertex(originX, originY + static_cast<float>(depth) * kCubeSize, boardZ);
+        glEnd();
+
+        glLineWidth(1.0f);
+        glBegin(GL_LINES);
+        setColor(boardOutline, 0.48f);
+        for (std::int32_t x = 0; x <= width; ++x)
+        {
+            const float xf = originX + static_cast<float>(x) * kCubeSize;
+            emitVertex(xf, originY, boardZ + 0.01f);
+            emitVertex(xf, originY + static_cast<float>(depth) * kCubeSize, boardZ + 0.01f);
+        }
+        for (std::int32_t y = 0; y <= depth; ++y)
+        {
+            const float yf = originY + static_cast<float>(y) * kCubeSize;
+            emitVertex(originX, yf, boardZ + 0.01f);
+            emitVertex(originX + static_cast<float>(width) * kCubeSize, yf, boardZ + 0.01f);
+        }
+        glEnd();
+
+        for (std::int32_t localY = 0; localY < depth; ++localY)
+        {
+            for (std::int32_t localX = 0; localX < width; ++localX)
+            {
+                const auto srcX = sourceStartX + localX;
+                const auto srcY = sourceStartY + localY;
+
+                std::array<std::int32_t, kPitchBandHeight> occupiedLayers{};
+                std::int32_t occupiedCount = 0;
+                for (std::int32_t localLayer = 1; localLayer <= layerCount; ++localLayer)
+                {
+                    if (!cubeExistsInPatchBand(sourceFloorIndex, sourceStartX, sourceStartY, width, depth, srcX, srcY, layerStart, layerCount, localLayer))
+                    {
+                        continue;
+                    }
+
+                    occupiedLayers[occupiedCount++] = layerStart + localLayer - 1;
+                }
+
+                if (occupiedCount == 0)
+                {
+                    continue;
+                }
+
+                const float x0 = originX + static_cast<float>(localX) * kCubeSize;
+                const float y0 = originY + static_cast<float>(localY) * kCubeSize;
+                const float x1 = x0 + kCubeSize;
+                const float y1 = y0 + kCubeSize;
+                constexpr float kOuterPad = 0.09f;
+                constexpr float kStripeGap = 0.018f;
+                constexpr float kGlowPad = 0.04f;
+
+                glBegin(GL_QUADS);
+                setColor(mixColor(cellBase, Color3f{0.43f, 0.97f, 1.0f}, 0.10f), 0.14f);
+                emitVertex(x0 + kGlowPad, y0 + kGlowPad, overlayZ - 0.01f);
+                emitVertex(x1 - kGlowPad, y0 + kGlowPad, overlayZ - 0.01f);
+                emitVertex(x1 - kGlowPad, y1 - kGlowPad, overlayZ - 0.01f);
+                emitVertex(x0 + kGlowPad, y1 - kGlowPad, overlayZ - 0.01f);
+                glEnd();
+
+                glBegin(GL_QUADS);
+                setColor(cellBase, 0.98f);
+                emitVertex(x0 + kOuterPad, y0 + kOuterPad, overlayZ);
+                emitVertex(x1 - kOuterPad, y0 + kOuterPad, overlayZ);
+                emitVertex(x1 - kOuterPad, y1 - kOuterPad, overlayZ);
+                emitVertex(x0 + kOuterPad, y1 - kOuterPad, overlayZ);
+                glEnd();
+
+                const float usableHeight = (kCubeSize - 2.0f * kOuterPad) - kStripeGap * static_cast<float>(occupiedCount - 1);
+                const float stripeHeight = std::max(usableHeight / static_cast<float>(occupiedCount), 0.02f);
+
+                for (std::int32_t stripeIndex = 0; stripeIndex < occupiedCount; ++stripeIndex)
+                {
+                    const auto absoluteLayer = occupiedLayers[stripeIndex];
+                    const auto stripeColor = mixColor(levelColor(absoluteLayer), Color3f{1.0f, 1.0f, 1.0f}, 0.22f);
+                    const float stripeY0 = y0 + kOuterPad + static_cast<float>(stripeIndex) * (stripeHeight + kStripeGap);
+                    const float stripeY1 = std::min(stripeY0 + stripeHeight, y1 - kOuterPad);
+                    const float stripeX0 = x0 + kOuterPad + 0.02f;
+                    const float stripeX1 = x1 - kOuterPad - 0.02f;
+
+                    glBegin(GL_QUADS);
+                    setColor(stripeColor, 0.22f);
+                    emitVertex(x0 + kOuterPad, stripeY0, overlayZ + 0.005f);
+                    emitVertex(x1 - kOuterPad, stripeY0, overlayZ + 0.005f);
+                    emitVertex(x1 - kOuterPad, stripeY1, overlayZ + 0.005f);
+                    emitVertex(x0 + kOuterPad, stripeY1, overlayZ + 0.005f);
+                    glEnd();
+
+                    glBegin(GL_QUADS);
+                    setColor(stripeColor, 0.98f);
+                    emitVertex(stripeX0, stripeY0, overlayZ + 0.012f);
+                    emitVertex(stripeX1, stripeY0, overlayZ + 0.012f);
+                    emitVertex(stripeX1, stripeY1, overlayZ + 0.012f);
+                    emitVertex(stripeX0, stripeY1, overlayZ + 0.012f);
+                    glEnd();
+                }
+
+                glLineWidth(1.0f);
+                glBegin(GL_LINE_LOOP);
+                setColor(cellOutline, 0.72f);
+                emitVertex(x0 + kOuterPad, y0 + kOuterPad, overlayZ + 0.02f);
+                emitVertex(x1 - kOuterPad, y0 + kOuterPad, overlayZ + 0.02f);
+                emitVertex(x1 - kOuterPad, y1 - kOuterPad, overlayZ + 0.02f);
+                emitVertex(x0 + kOuterPad, y1 - kOuterPad, overlayZ + 0.02f);
+                glEnd();
+            }
+        }
+    }
+
     void drawBuildMarker()
     {
         const auto location = currentCursorLocation();
@@ -1461,6 +1645,21 @@ namespace
         const float guideBase = location.guideBaseZ + 0.02f;
         const auto outline = Color3f{0.20f, 0.95f, 0.98f};
         const auto guide = Color3f{0.18f, 0.75f, 0.96f};
+
+        if (gDetailQuarterView && gDetailTopDownView)
+        {
+            const float topZ = floorBaseZ(0) + 0.16f;
+            glLineWidth(2.0f);
+            glBegin(GL_LINE_LOOP);
+            setColor(outline, 0.96f);
+            emitVertex(x0 + 0.08f, y0 + 0.08f, topZ);
+            emitVertex(x1 - 0.08f, y0 + 0.08f, topZ);
+            emitVertex(x1 - 0.08f, y1 - 0.08f, topZ);
+            emitVertex(x0 + 0.08f, y1 - 0.08f, topZ);
+            glEnd();
+            glLineWidth(1.0f);
+            return;
+        }
 
         glLineWidth(2.0f);
         glBegin(GL_LINE_LOOP);
@@ -1492,14 +1691,49 @@ namespace
         glLoadIdentity();
 
         const float aspect = static_cast<float>(gWindowWidth) / static_cast<float>(gWindowHeight);
+        const float centerX = sceneSpanX() * 0.5f;
+        const float centerY = sceneSpanY() * 0.5f;
+        const float centerZ = totalSceneHeight() * 0.5f;
+        const float depthHalfRange = 1600.0f;
+
+        if (gDetailQuarterView && gDetailTopDownView)
+        {
+            float halfWidth = (sceneSpanX() * 0.5f) / 0.90f;
+            float halfHeight = (sceneSpanY() * 0.5f) / 0.90f;
+
+            if (aspect >= 1.0f)
+            {
+                halfWidth = std::max(halfWidth, halfHeight * aspect);
+            }
+            else
+            {
+                halfHeight = std::max(halfHeight, halfWidth / aspect);
+            }
+
+            glOrtho(-halfWidth, halfWidth,
+                    -halfHeight, halfHeight,
+                    -depthHalfRange, depthHalfRange);
+
+            glMatrixMode(GL_MODELVIEW);
+            glLoadIdentity();
+            gluLookAt(centerX,
+                      centerY,
+                      totalSceneHeight() + 320.0f,
+                      centerX,
+                      centerY,
+                      centerZ,
+                      0.0f,
+                      1.0f,
+                      0.0f);
+            return;
+        }
+
         const float sceneHeight = totalSceneHeight();
         const float worldHalfExtent = std::max({
             sceneSpanX(),
             sceneSpanY(),
             sceneHeight * 1.62f
         }) * 0.80f / gZoom;
-
-        const float depthHalfRange = 1600.0f;
 
         if (aspect >= 1.0f)
         {
@@ -1517,9 +1751,6 @@ namespace
         glMatrixMode(GL_MODELVIEW);
         glLoadIdentity();
 
-        const float centerX = sceneSpanX() * 0.5f;
-        const float centerY = sceneSpanY() * 0.5f;
-        const float centerZ = totalSceneHeight() * 0.5f;
         const float radiusXY = 620.0f;
         const float cameraX = centerX + std::cos(gCameraAngle) * radiusXY;
         const float cameraY = centerY + std::sin(gCameraAngle) * radiusXY;
@@ -1582,9 +1813,12 @@ namespace
         const std::string layout = gIslandMode ? "Layout: 4 islands" : "Layout: full grid";
         const std::string view = gDetailView ? "View: focused" : "View: stage";
         const std::string gMode = gDetailView ? "G split-focus" : "G islands";
+        const std::string buildControls = (gDetailQuarterView && !gDetailTopDownView)
+            ? "WASD move   Q/E z   R place   T remove   Enter top-down   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset"
+            : "WASD move   Q/E z   R place   T remove   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset";
         const std::string controls = splitIslandViewActive()
             ? "arrows select   Enter focus   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset"
-            : "WASD move   Q/E z   R place   T remove   Enter focus   K save   L load   Esc back   ,/. rotate   F switch   " + gMode + "   N regenerate   J key   U scale   =/- zoom   0 reset";
+            : buildControls;
         drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 66.0f, GLUT_BITMAP_HELVETICA_12, mode + "   " + layout + "   " + view + "   " + controls);
         glColor4f(0.62f, 0.72f, 0.88f, 0.90f);
         drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 88.0f, GLUT_BITMAP_HELVETICA_12, pitchCycleSummary());
@@ -1612,6 +1846,7 @@ namespace
         const auto savedDetailView = gDetailView;
         const auto savedDetailSubIslandMode = gDetailSubIslandMode;
         const auto savedDetailQuarterView = gDetailQuarterView;
+        const auto savedDetailTopDownView = gDetailTopDownView;
         const auto savedTitlePreviewMode = gTitlePreviewMode;
 
         gTitlePreviewMode = true;
@@ -1620,6 +1855,7 @@ namespace
         gDetailView = false;
         gDetailSubIslandMode = false;
         gDetailQuarterView = false;
+        gDetailTopDownView = false;
         gZoom = 1.36f;
         gCameraAngle = -0.78539816339f;
 
@@ -1640,6 +1876,7 @@ namespace
         gDetailView = savedDetailView;
         gDetailSubIslandMode = savedDetailSubIslandMode;
         gDetailQuarterView = savedDetailQuarterView;
+        gDetailTopDownView = savedDetailTopDownView;
         gTitlePreviewMode = savedTitlePreviewMode;
 
         glDisable(GL_DEPTH_TEST);
@@ -1776,8 +2013,15 @@ namespace
                 const auto subSourceStartX = sourceStartX + (gActiveDetailSubIsland % 2) * kFocusedSubIslandSize;
                 const auto subSourceStartY = sourceStartY + (gActiveDetailSubIsland / 2) * kFocusedSubIslandSize;
                 drawPlatform(0.0f, 0.0f, kFocusedSubIslandSize, kFocusedSubIslandSize, 0, 1.0f);
-                drawBlockPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
-                drawTopLinesPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                if (gDetailTopDownView)
+                {
+                    drawPerformancePatch(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight);
+                }
+                else
+                {
+                    drawBlockPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                    drawTopLinesPatchImmediate(gActiveFloor, subSourceStartX, subSourceStartY, kFocusedSubIslandSize, kFocusedSubIslandSize, 0.0f, 0.0f, 0, layerStart, kPitchBandHeight, 1.0f);
+                }
                 return;
             }
 
@@ -1844,6 +2088,7 @@ namespace
             gDetailView = false;
             gDetailSubIslandMode = false;
             gDetailQuarterView = false;
+            gDetailTopDownView = false;
             clampBuildCursor();
             return;
         }
@@ -2045,9 +2290,14 @@ namespace
         }
         else if (key == kKeyEnter)
         {
-            if (gDetailView && gDetailSubIslandMode && !gDetailQuarterView)
+            if (gDetailQuarterView)
+            {
+                gDetailTopDownView = true;
+            }
+            else if (gDetailView && gDetailSubIslandMode && !gDetailQuarterView)
             {
                 gDetailQuarterView = true;
+                gDetailTopDownView = false;
                 gZoom = kMinZoom;
             }
             else if (gIslandMode && gFourFloorMode && !gDetailView)
@@ -2055,6 +2305,7 @@ namespace
                 gDetailView = true;
                 gDetailSubIslandMode = false;
                 gDetailQuarterView = false;
+                gDetailTopDownView = false;
                 gZoom = kMinZoom;
             }
         }
@@ -2064,6 +2315,7 @@ namespace
             gDetailView = false;
             gDetailSubIslandMode = false;
             gDetailQuarterView = false;
+            gDetailTopDownView = false;
             if (gIslandMode && gFourFloorMode)
             {
                 resetSelectionToSpiralStart();
@@ -2122,6 +2374,7 @@ namespace
                         gActiveDetailSubIsland = 0;
                     }
                 }
+                gDetailTopDownView = false;
             }
             else
             {
@@ -2129,6 +2382,7 @@ namespace
                 gDetailView = false;
                 gDetailSubIslandMode = false;
                 gDetailQuarterView = false;
+                gDetailTopDownView = false;
                 if (gIslandMode && gFourFloorMode)
                 {
                     resetSelectionToSpiralStart();
@@ -2153,7 +2407,11 @@ namespace
         }
         else if (key == kKeyEscape)
         {
-            if (gDetailQuarterView)
+            if (gDetailTopDownView)
+            {
+                gDetailTopDownView = false;
+            }
+            else if (gDetailQuarterView)
             {
                 gDetailQuarterView = false;
             }
@@ -2162,12 +2420,14 @@ namespace
                 gDetailView = false;
                 gDetailSubIslandMode = false;
                 gDetailQuarterView = false;
+                gDetailTopDownView = false;
             }
             else
             {
                 gDetailView = false;
                 gDetailSubIslandMode = false;
                 gDetailQuarterView = false;
+                gDetailTopDownView = false;
             }
         }
 
