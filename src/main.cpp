@@ -79,6 +79,7 @@ namespace
     constexpr int kSpecialRight = GLUT_KEY_RIGHT;
     constexpr int kSpecialDown = GLUT_KEY_DOWN;
     constexpr unsigned int kAutosaveIntervalMs = 120000u;
+    constexpr unsigned int kTitleAnimationIntervalMs = 33u;
 
     struct Color3f
     {
@@ -132,6 +133,9 @@ namespace
     bool gDetailView = false;
     bool gDetailSubIslandMode = false;
     bool gDetailQuarterView = false;
+    bool gTitleScreen = true;
+    bool gTitlePreviewMode = false;
+    std::int32_t gTitleMenuSelection = 2;
     std::int32_t gSelectedKey = 0;
     std::size_t gSelectedScale = 1;
     std::uint32_t gSeed = 0xC0FFEEu;
@@ -151,6 +155,7 @@ namespace
     constexpr Color3f kHorizonGlow = {0.16f, 0.20f, 0.34f};
     constexpr Color3f kOutline = {0.93f, 0.95f, 0.99f};
     constexpr Color3f kShadow = {0.03f, 0.03f, 0.05f};
+    constexpr const char* kTitleMenuItems[3] = {"New", "Load", "Continue"};
 
     std::size_t layerStride()
     {
@@ -188,6 +193,9 @@ namespace
     float floorBaseZ(std::int32_t floorIndex);
     std::int32_t islandSourceStartX(std::int32_t islandIndex);
     std::int32_t islandSourceStartY(std::int32_t islandIndex);
+    std::string latestSavePath();
+    void drawSceneImmediate();
+    std::int32_t titleMenuIndexAt(float x, float y);
 
     struct BuildContext
     {
@@ -386,6 +394,77 @@ namespace
 #endif
     }
 
+    std::string chooseLoadPath()
+    {
+#ifdef __APPLE__
+        const auto cwd = std::filesystem::current_path().string();
+
+        std::string command = "/usr/bin/osascript";
+        command += " -e ";
+        command += shellSingleQuoted(std::string("set defaultLocation to POSIX file \"") + cwd + "\"");
+        command += " -e ";
+        command += shellSingleQuoted("try");
+        command += " -e ";
+        command += shellSingleQuoted("POSIX path of (choose file with prompt \"Load block world\" default location defaultLocation)");
+        command += " -e ";
+        command += shellSingleQuoted("on error number -128");
+        command += " -e ";
+        command += shellSingleQuoted("return \"\"");
+        command += " -e ";
+        command += shellSingleQuoted("end try");
+
+        std::array<char, 1024> buffer{};
+        std::string output;
+        FILE* pipe = popen(command.c_str(), "r");
+        if (pipe == nullptr)
+        {
+            return std::string();
+        }
+
+        while (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
+        {
+            output += buffer.data();
+        }
+
+        pclose(pipe);
+
+        while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+        {
+            output.pop_back();
+        }
+
+        if (std::filesystem::path(output).extension() != ".drd")
+        {
+            return std::string();
+        }
+
+        return output;
+#else
+        return latestSavePath();
+#endif
+    }
+
+    void resetToFreshWorld()
+    {
+        gSeed = hashU32(gSeed + 0x9e3779b9u);
+        gFourFloorMode = false;
+        gIslandMode = false;
+        gDetailView = false;
+        gDetailSubIslandMode = false;
+        gDetailQuarterView = false;
+        gActiveIsland = 2;
+        gActiveFloor = kFloorCount - 1;
+        gActiveDetailSubIsland = 0;
+        gCursorX = kGridWidth / 2;
+        gCursorY = kGridDepth / 2;
+        gCursorZ = 0;
+        gZoom = kMinZoom;
+        gCameraAngle = -0.78539816339f;
+        regenerateBlocks();
+        syncActiveSelection();
+        gSaveStatus = "New world ready";
+    }
+
     bool saveWorldToFile(const std::string& path)
     {
         std::ofstream output(path, std::ios::binary);
@@ -529,6 +608,16 @@ namespace
         }
 
         glutTimerFunc(kAutosaveIntervalMs, autosaveCallback, 0);
+    }
+
+    void titleAnimationCallback(int)
+    {
+        if (gTitleScreen)
+        {
+            glutPostRedisplay();
+        }
+
+        glutTimerFunc(kTitleAnimationIntervalMs, titleAnimationCallback, 0);
     }
 
     bool splitIslandViewActive()
@@ -942,6 +1031,11 @@ namespace
 
     float focusForRegion(std::int32_t islandIndex, std::int32_t floorIndex)
     {
+        if (gTitlePreviewMode)
+        {
+            return 1.0f;
+        }
+
         if (!gIslandMode || !gFourFloorMode)
         {
             return 1.0f;
@@ -952,6 +1046,11 @@ namespace
 
     float focusForDetailSubIsland(std::int32_t subIslandIndex)
     {
+        if (gTitlePreviewMode)
+        {
+            return 1.0f;
+        }
+
         if (!gDetailView || !gDetailSubIslandMode || gDetailQuarterView)
         {
             return 1.0f;
@@ -1446,6 +1545,16 @@ namespace
         }
     }
 
+    float bitmapTextWidth(void* font, const std::string& text)
+    {
+        float width = 0.0f;
+        for (const unsigned char c : text)
+        {
+            width += static_cast<float>(glutBitmapWidth(font, c));
+        }
+        return width;
+    }
+
     void drawHud()
     {
         glDisable(GL_DEPTH_TEST);
@@ -1485,6 +1594,160 @@ namespace
         drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 132.0f, GLUT_BITMAP_HELVETICA_12, activeSelectionSummary());
         glColor4f(0.73f, 0.82f, 0.98f, 0.92f);
         drawBitmapText(38.0f, static_cast<float>(gWindowHeight) - 154.0f, GLUT_BITMAP_HELVETICA_12, gSaveStatus);
+
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+    }
+
+    void drawTitleScreen()
+    {
+        const float width = static_cast<float>(gWindowWidth);
+        const float height = static_cast<float>(gWindowHeight);
+        const auto savedZoom = gZoom;
+        const auto savedCameraAngle = gCameraAngle;
+        const auto savedFourFloorMode = gFourFloorMode;
+        const auto savedIslandMode = gIslandMode;
+        const auto savedDetailView = gDetailView;
+        const auto savedDetailSubIslandMode = gDetailSubIslandMode;
+        const auto savedDetailQuarterView = gDetailQuarterView;
+        const auto savedTitlePreviewMode = gTitlePreviewMode;
+
+        gTitlePreviewMode = true;
+        gFourFloorMode = true;
+        gIslandMode = true;
+        gDetailView = false;
+        gDetailSubIslandMode = false;
+        gDetailQuarterView = false;
+        gZoom = 1.36f;
+        gCameraAngle = -0.78539816339f;
+
+        setProjection();
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glDisable(GL_LINE_SMOOTH);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(1.0f, 1.0f);
+        drawSceneImmediate();
+        glDisable(GL_POLYGON_OFFSET_FILL);
+
+        gZoom = savedZoom;
+        gCameraAngle = savedCameraAngle;
+        gFourFloorMode = savedFourFloorMode;
+        gIslandMode = savedIslandMode;
+        gDetailView = savedDetailView;
+        gDetailSubIslandMode = savedDetailSubIslandMode;
+        gDetailQuarterView = savedDetailQuarterView;
+        gTitlePreviewMode = savedTitlePreviewMode;
+
+        glDisable(GL_DEPTH_TEST);
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0.0, static_cast<double>(gWindowWidth), 0.0, static_cast<double>(gWindowHeight), -1.0, 1.0);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+
+        auto drawSoftQuad = [&](float x0, float y0, float x1, float y1, const Color3f& a, const Color3f& b, float alpha)
+        {
+            glBegin(GL_QUADS);
+            glColor4f(a.r, a.g, a.b, alpha);
+            glVertex2f(x0, y0);
+            glVertex2f(x1, y0);
+            glColor4f(b.r, b.g, b.b, alpha);
+            glVertex2f(x1, y1);
+            glVertex2f(x0, y1);
+            glEnd();
+        };
+
+        auto drawShadow = [&](float cx, float cy, float rx, float ry, float alpha)
+        {
+            glBegin(GL_TRIANGLE_FAN);
+            glColor4f(0.04f, 0.05f, 0.09f, alpha);
+            glVertex2f(cx, cy);
+            glColor4f(0.04f, 0.05f, 0.09f, 0.0f);
+            for (int step = 0; step <= 32; ++step)
+            {
+                const float angle = static_cast<float>(step) / 32.0f * 6.28318530718f;
+                glVertex2f(cx + std::cos(angle) * rx, cy + std::sin(angle) * ry);
+            }
+            glEnd();
+        };
+
+        drawSoftQuad(0.0f, height * 0.78f, width, height,
+                     Color3f{0.02f, 0.03f, 0.08f},
+                     Color3f{0.02f, 0.03f, 0.08f},
+                     0.46f);
+        drawSoftQuad(0.0f, 0.0f, width, height * 0.32f,
+                     Color3f{0.02f, 0.03f, 0.08f},
+                     Color3f{0.02f, 0.03f, 0.08f},
+                     0.42f);
+
+        const float dockWidth = width * 0.38f;
+        const float dockHeight = 58.0f;
+        const float dockX0 = (width - dockWidth) * 0.5f;
+        const float dockX1 = dockX0 + dockWidth;
+        const float dockY0 = height * 0.085f;
+        const float dockY1 = dockY0 + dockHeight;
+
+        drawShadow(width * 0.50f, dockY0 - 2.0f, dockWidth * 0.42f, 14.0f, 0.16f);
+
+        glBegin(GL_QUADS);
+        glColor4f(0.02f, 0.03f, 0.07f, 0.54f);
+        glVertex2f(dockX0, dockY0);
+        glVertex2f(dockX1, dockY0);
+        glColor4f(0.06f, 0.07f, 0.12f, 0.64f);
+        glVertex2f(dockX1, dockY1);
+        glVertex2f(dockX0, dockY1);
+        glEnd();
+
+        const float menuWidth = 146.0f;
+        const float menuGap = 18.0f;
+        const float totalMenuWidth = menuWidth * 3.0f + menuGap * 2.0f;
+        const float menuStartX = (width - totalMenuWidth) * 0.5f;
+        const float menuY = dockY0 + 9.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            const bool selected = gTitleMenuSelection == i;
+            const std::string label = kTitleMenuItems[i];
+            const float cardX0 = menuStartX + static_cast<float>(i) * (menuWidth + menuGap);
+            const float cardX1 = cardX0 + menuWidth;
+            const float cardY0 = menuY;
+            const float cardY1 = menuY + 32.0f;
+            const float labelWidth = bitmapTextWidth(GLUT_BITMAP_HELVETICA_18, label);
+            const float labelX = cardX0 + (menuWidth - labelWidth) * 0.5f;
+            const float labelY = menuY + 9.0f;
+
+            if (selected)
+            {
+                glBegin(GL_LINES);
+                glColor4f(0.88f, 0.92f, 1.0f, 0.32f);
+                glVertex2f(cardX0 + 18.0f, cardY0 + 2.0f);
+                glVertex2f(cardX1 - 18.0f, cardY0 + 2.0f);
+                glEnd();
+            }
+            else
+            {
+                glBegin(GL_LINES);
+                glColor4f(0.70f, 0.78f, 0.96f, 0.16f);
+                glVertex2f(cardX0 + 14.0f, cardY0);
+                glVertex2f(cardX1 - 14.0f, cardY0);
+                glEnd();
+            }
+
+            if (selected)
+            {
+                glColor4f(0.98f, 0.99f, 1.0f, 0.99f);
+            }
+            else
+            {
+                glColor4f(0.76f, 0.82f, 0.94f, 0.74f);
+            }
+            drawBitmapText(labelX, labelY, GLUT_BITMAP_HELVETICA_18, label);
+        }
 
         glPopMatrix();
         glMatrixMode(GL_PROJECTION);
@@ -1594,6 +1857,14 @@ namespace
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         drawBackdrop();
+
+        if (gTitleScreen)
+        {
+            drawTitleScreen();
+            glutSwapBuffers();
+            return;
+        }
+
         setProjection();
 
         glDisable(GL_BLEND);
@@ -1614,6 +1885,76 @@ namespace
         glutSwapBuffers();
     }
 
+    void activateTitleMenuSelection()
+    {
+        if (gTitleMenuSelection == 0)
+        {
+            resetToFreshWorld();
+            gTitleScreen = false;
+            return;
+        }
+
+        if (gTitleMenuSelection == 1)
+        {
+            const auto path = chooseLoadPath();
+            if (path.empty())
+            {
+                gSaveStatus = "Load canceled";
+            }
+            else if (loadWorldFromFile(path))
+            {
+                gSavePath = path;
+                gAutosaveEnabled = true;
+                gSaveStatus = "Load: " + path;
+                gTitleScreen = false;
+            }
+            else
+            {
+                gSaveStatus = "Load failed: " + path;
+            }
+            return;
+        }
+
+        gTitleScreen = false;
+    }
+
+    std::int32_t titleMenuIndexAt(float x, float y)
+    {
+        const float width = static_cast<float>(gWindowWidth);
+        const float height = static_cast<float>(gWindowHeight);
+        const float dockWidth = width * 0.38f;
+        const float dockHeight = 58.0f;
+        const float dockX0 = (width - dockWidth) * 0.5f;
+        const float dockX1 = dockX0 + dockWidth;
+        const float dockY0 = height * 0.085f;
+        const float dockY1 = dockY0 + dockHeight;
+
+        if (x < dockX0 || x > dockX1 || y < dockY0 || y > dockY1)
+        {
+            return -1;
+        }
+
+        const float menuWidth = 146.0f;
+        const float menuGap = 18.0f;
+        const float totalMenuWidth = menuWidth * 3.0f + menuGap * 2.0f;
+        const float menuStartX = (width - totalMenuWidth) * 0.5f;
+        const float menuY = dockY0 + 9.0f;
+
+        for (std::int32_t i = 0; i < 3; ++i)
+        {
+            const float cardX0 = menuStartX + static_cast<float>(i) * (menuWidth + menuGap);
+            const float cardX1 = cardX0 + menuWidth;
+            const float cardY0 = menuY;
+            const float cardY1 = menuY + 32.0f;
+            if (x >= cardX0 && x <= cardX1 && y >= cardY0 && y <= cardY1)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     void reshape(int width, int height)
     {
         gWindowWidth = std::max(width, 1);
@@ -1624,6 +1965,30 @@ namespace
 
     void keyboard(unsigned char key, int, int)
     {
+        if (gTitleScreen)
+        {
+            if (key == kKeyWLower || key == kKeyWUpper)
+            {
+                gTitleMenuSelection = (gTitleMenuSelection + 2) % 3;
+            }
+            else if (key == kKeySLower || key == kKeySUpper)
+            {
+                gTitleMenuSelection = (gTitleMenuSelection + 1) % 3;
+            }
+            else if (key == kKeyEnter)
+            {
+                activateTitleMenuSelection();
+            }
+            else if (key == kKeyLLower || key == kKeyLUpper)
+            {
+                gTitleMenuSelection = 1;
+                activateTitleMenuSelection();
+            }
+
+            glutPostRedisplay();
+            return;
+        }
+
         const auto buildContext = currentBuildContext();
 
         if (buildContext.valid && (key == kKeyWLower || key == kKeyWUpper))
@@ -1812,6 +2177,25 @@ namespace
 
     void special(int key, int, int)
     {
+        if (gTitleScreen)
+        {
+            if (key == kSpecialUp || key == kSpecialLeft)
+            {
+                gTitleMenuSelection = (gTitleMenuSelection + 2) % 3;
+            }
+            else if (key == kSpecialDown || key == kSpecialRight)
+            {
+                gTitleMenuSelection = (gTitleMenuSelection + 1) % 3;
+            }
+            else
+            {
+                return;
+            }
+
+            glutPostRedisplay();
+            return;
+        }
+
         if (currentBuildContext().valid)
         {
             return;
@@ -1870,6 +2254,31 @@ namespace
         setSelectionFromSpiralIndex(spiralIndex);
         glutPostRedisplay();
     }
+
+    void mouse(int button, int state, int x, int y)
+    {
+        if (!gTitleScreen)
+        {
+            return;
+        }
+
+        if (button != GLUT_LEFT_BUTTON || state != GLUT_DOWN)
+        {
+            return;
+        }
+
+        const float mouseX = static_cast<float>(x);
+        const float mouseY = static_cast<float>(gWindowHeight - y);
+        const auto index = titleMenuIndexAt(mouseX, mouseY);
+        if (index < 0)
+        {
+            return;
+        }
+
+        gTitleMenuSelection = index;
+        activateTitleMenuSelection();
+        glutPostRedisplay();
+    }
 }
 
 int main(int argc, char** argv)
@@ -1887,7 +2296,9 @@ int main(int argc, char** argv)
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
     glutSpecialFunc(special);
+    glutMouseFunc(mouse);
     glutTimerFunc(kAutosaveIntervalMs, autosaveCallback, 0);
+    glutTimerFunc(kTitleAnimationIntervalMs, titleAnimationCallback, 0);
 
     glutMainLoop();
     return 0;
